@@ -84,7 +84,7 @@ syncThemeChange(systemTheme);
     initializeThemeMode();
 })();
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
     // Check for custom color
     const storedCustomColor = localStorage.getItem(customThemeStorageKey);
     if (storedCustomColor) {
@@ -106,8 +106,9 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    // Remove Loading Screen when the DOM and the theme has loaded
+    await waitForInitialWallpaper();
     document.getElementById("LoadingScreen").style.display = "none";
+    document.documentElement.classList.add("new-tab-ready");
 
     // Clean up preload data attributes
     document.documentElement.removeAttribute("data-preferred-theme");

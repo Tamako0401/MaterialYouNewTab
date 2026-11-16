@@ -14,13 +14,17 @@ const timestampKey = "lastUpdateTime"; // Key to store last update time
 const imageTypeKey = "imageType"; // Key to store the type of image ("random" or "upload")
 
 let currentBgUrl = null;
+let wallpaperChanged = false;
 
 // To set background image using a Blob
 function setBackground(blob) {
+    setBackgroundUrl(URL.createObjectURL(blob));
+}
+
+function setBackgroundUrl(url) {
     const previousUrl = currentBgUrl;
-    const newUrl = URL.createObjectURL(blob);
-    currentBgUrl = newUrl;
-    document.body.style.setProperty("--bg-image", `url(${newUrl})`);
+    currentBgUrl = url;
+    document.body.style.setProperty("--bg-image", `url(${url})`);
     toggleBackgroundType(true);
     if (previousUrl) {
         URL.revokeObjectURL(previousUrl);
@@ -59,17 +63,20 @@ async function saveImageToIndexedDB(imageBlob, isRandom) {
 // Load image Blob, timestamp, and type from IndexedDB
 async function loadImageAndDetails() {
     const db = await openDatabase();
-    return Promise.all([
-        getFromStore(db, "backgroundImage"),
-        getFromStore(db, timestampKey),
-        getFromStore(db, imageTypeKey)
-    ]);
+    try {
+        const store = db.transaction(storeName, "readonly").objectStore(storeName);
+        return Promise.all([
+            getFromStore(store, "backgroundImage"),
+            getFromStore(store, timestampKey),
+            getFromStore(store, imageTypeKey)
+        ]);
+    } finally {
+        db.close();
+    }
 }
 
-function getFromStore(db, key) {
+function getFromStore(store, key) {
     return new Promise((resolve, reject) => {
-        const transaction = db.transaction(storeName, "readonly");
-        const store = transaction.objectStore(storeName);
         const request = store.get(key);
 
         request.onsuccess = () => resolve(request.result);
@@ -92,16 +99,6 @@ async function clearImageFromIndexedDB() {
     });
 }
 
-// Handle file input and save image as upload
-document.getElementById("imageUpload").addEventListener("change", function (event) {
-    const file = event.target.files[0];
-    if (file) {
-        saveImageToIndexedDB(file, false)
-            .then(() => setBackground(file))
-            .catch(error => console.error(error));
-    }
-});
-
 // Fetch and apply random image as background
 const RANDOM_IMAGE_URL = "https://picsum.photos/1920/1080";
 
@@ -111,9 +108,18 @@ async function applyRandomImage(showConfirmation = true) {
     ))) {
         return;
     }
+    if (showConfirmation) {
+        wallpaperChanged = true;
+    }
     try {
         const response = await fetch(RANDOM_IMAGE_URL);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
         const blob = await response.blob();
+        if (!showConfirmation && wallpaperChanged) {
+            return;
+        }
         await saveImageToIndexedDB(blob, true);
         setBackground(blob);
     } catch (error) {
@@ -126,52 +132,84 @@ function toggleBackgroundType(hasWallpaper) {
     document.body.setAttribute("data-bg", hasWallpaper ? "wallpaper" : "color");
 }
 
-// Check and update image on page load
-function checkAndUpdateImage() {
-    loadImageAndDetails()
-        .then(([blob, savedTimestamp, imageType]) => {
-            const now = new Date();
-            const lastUpdate = new Date(savedTimestamp);
+// Start the cache read in the head while the rest of the new tab is parsing.
+const wallpaperDOMReady = new Promise(resolve => {
+    document.addEventListener("DOMContentLoaded", resolve, { once: true });
+});
+const initialWallpaper = loadInitialWallpaper();
 
-            if (!blob || !savedTimestamp || isNaN(lastUpdate)) {
-                toggleBackgroundType(false);
-                return;
-            }
-
-            if (imageType === "upload") {
-                setBackground(blob);
-                return;
-            }
-
-            if (lastUpdate.toDateString() !== now.toDateString()) {
-                applyRandomImage(false);
-            } else {
-                setBackground(blob);
-            }
-
-        })
-        .catch((error) => {
-            console.warn("Unable to load image details:", error);
-            toggleBackgroundType(false);
-        });
-}
-
-// Event listeners for buttons
-document.getElementById("uploadTrigger").addEventListener("click", () =>
-    document.getElementById("imageUpload").click()
-);
-
-document.getElementById("clearImage").addEventListener("click", async function () {
+async function loadInitialWallpaper() {
+    let url;
+    let refreshRandom = false;
     try {
-        const [blob] = await loadImageAndDetails();
-        if (!blob) {
-            await alertPrompt(translations[currentLanguage]?.Nobackgroundset || translations["en"].Nobackgroundset);
-            return;
+        const [blob, savedTimestamp, imageType] = await loadImageAndDetails();
+        const lastUpdate = new Date(savedTimestamp);
+        if (!(blob instanceof Blob) || !savedTimestamp || isNaN(lastUpdate)) {
+            return false;
         }
 
-        const confirmationMessage = translations[currentLanguage]?.clearbackgroundimage || translations["en"].clearbackgroundimage;
-        if (await confirmPrompt(confirmationMessage)) {
-            try {
+        refreshRandom = imageType !== "upload" &&
+            lastUpdate.toDateString() !== new Date().toDateString();
+        url = URL.createObjectURL(blob);
+        const image = new Image();
+        image.src = url;
+        await image.decode();
+        await wallpaperDOMReady;
+
+        if (wallpaperChanged) {
+            URL.revokeObjectURL(url);
+            return false;
+        }
+        setBackgroundUrl(url);
+    } catch (error) {
+        if (url) {
+            URL.revokeObjectURL(url);
+        }
+        console.warn("Unable to load saved wallpaper:", error);
+    }
+    return refreshRandom;
+}
+
+async function waitForInitialWallpaper() {
+    let timeoutId;
+    const timeout = new Promise(resolve => {
+        timeoutId = setTimeout(resolve, 1000);
+    });
+    await Promise.race([initialWallpaper, timeout]);
+    clearTimeout(timeoutId);
+}
+
+initialWallpaper.then(refreshRandom => {
+    if (refreshRandom && !wallpaperChanged) {
+        applyRandomImage(false);
+    }
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+    const imageUpload = document.getElementById("imageUpload");
+    imageUpload.addEventListener("change", event => {
+        const file = event.target.files[0];
+        if (file) {
+            wallpaperChanged = true;
+            saveImageToIndexedDB(file, false)
+                .then(() => setBackground(file))
+                .catch(error => console.error(error));
+        }
+    });
+
+    document.getElementById("uploadTrigger").addEventListener("click", () => imageUpload.click());
+
+    document.getElementById("clearImage").addEventListener("click", async () => {
+        try {
+            const [blob] = await loadImageAndDetails();
+            if (!blob) {
+                await alertPrompt(translations[currentLanguage]?.Nobackgroundset || translations["en"].Nobackgroundset);
+                return;
+            }
+
+            const confirmationMessage = translations[currentLanguage]?.clearbackgroundimage || translations["en"].clearbackgroundimage;
+            if (await confirmPrompt(confirmationMessage)) {
+                wallpaperChanged = true;
                 await clearImageFromIndexedDB();
                 if (currentBgUrl) {
                     URL.revokeObjectURL(currentBgUrl);
@@ -179,16 +217,11 @@ document.getElementById("clearImage").addEventListener("click", async function (
                 }
                 document.body.style.removeProperty("--bg-image");
                 toggleBackgroundType(false);
-            } catch (error) {
-                console.error(error);
             }
+        } catch (error) {
+            console.error(error);
         }
-    } catch (error) {
-        console.error(error);
-    }
-});
+    });
 
-document.getElementById("randomImageTrigger").addEventListener("click", applyRandomImage);
-
-// Start image check on page load
-checkAndUpdateImage();
+    document.getElementById("randomImageTrigger").addEventListener("click", () => applyRandomImage());
+}, { once: true });

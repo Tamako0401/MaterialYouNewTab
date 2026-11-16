@@ -1529,6 +1529,16 @@ body #bookmarkButton.bookmark-button.rotate {
 	border-radius: 10px;
 }
 
+/* Keep the clock hands at their starting angles behind the loading screen. */
+html:not(.new-tab-ready) #analogClock .sui {
+	transform: none !important;
+	transition: none !important;
+}
+
+html:not(.new-tab-ready) #analogClock #hour {
+	transform: rotate(90deg) !important;
+}
+
 #hour {
 	height: 80px;
 	top: -70px;
